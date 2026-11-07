@@ -1,0 +1,41 @@
+[server]
+host = "0.0.0.0"
+port = 3000
+request_timeout_secs = 120
+
+[renderer]
+mode = "auto"
+page_timeout_ms = 30000
+pool_size = 4
+
+[renderer.lightpanda]
+ws_url = "ws://lightpanda:9222/"
+
+# Second rung of the `auto` ladder (HTTP -> LightPanda -> Chrome). Only reachable
+# while the `heavy` profile is up; a missing endpoint fails over cleanly.
+[renderer.chrome]
+ws_url = "ws://chrome:9222/"
+
+[crawler]
+respect_robots_txt = false
+user_agent = "crw-homelab/0.1"
+
+# Present as a browser, not as a client library: rotate UA from crw's built-in
+# Chrome/Firefox/Safari pool and send the 12 browser-shaped headers
+# (Accept, Sec-Fetch-*, etc.) on the plain-HTTP tier.
+[crawler.stealth]
+enabled = true
+inject_headers = true
+
+[extraction]
+only_main_content = true
+
+# Search backend: the homelab's own SearXNG, reached over `search_net` under its
+# service name. No published port is involved — searxng joined search_net
+# solely so crw can make this call.
+[search]
+enabled = true
+searxng_url = "http://searxng:8080"
+timeout_ms = 30000
+default_limit = 8
+max_limit = 20

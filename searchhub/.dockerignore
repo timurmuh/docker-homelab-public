@@ -1,0 +1,12 @@
+# Only requirements.txt and app/ are needed in the build context.
+.venv/
+tests/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# No .env exists in this directory by design (keys arrive from the environment),
+# and one must never be baked into an image by accident.
+.env
+
+README.md

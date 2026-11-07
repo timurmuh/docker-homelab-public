@@ -1,0 +1,39 @@
+services:
+  org-mcp:
+    build: .
+    image: org-mcp:local
+    container_name: org-mcp
+    restart: unless-stopped
+    init: true
+    # Internal only: Open WebUI reaches this at http://org-mcp:8765/mcp on
+    # notes_net.  There is no published host port and no Traefik route, so no
+    # transport auth is needed or wanted.
+    environment:
+      TZ: UTC
+    volumes:
+      - org-data:/org
+      - ${ORG_MCP_DEPLOY_KEY:-/home/homelab/org-mcp/deploy_key}:/run/secrets/org_deploy_key:ro
+    networks:
+      - notes_net
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl -fsS --max-time 5 -X POST http://127.0.0.1:8765/mcp
+          -H 'Content-Type: application/json'
+          -H 'Accept: application/json, text/event-stream'
+          -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"health","version":"1"}}}'
+          | grep -q '"result"'
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  org-data:
+    name: org-data
+
+networks:
+  notes_net:
+    external: true
+    name: notes_net

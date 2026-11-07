@@ -1,0 +1,39 @@
+api:
+  dashboard: true
+
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+          permanent: true
+  websecure:
+    address: ":443"
+
+providers:
+  docker:
+    endpoint: "unix:///var/run/docker.sock"
+    exposedByDefault: false
+    network: traefik_net
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+
+certificatesResolvers:
+  cloudflare:
+    acme:
+      storage: "/letsencrypt/acme.json"
+      dnsChallenge:
+        provider: cloudflare
+      # WARNING: Use staging CA first to avoid rate limits. Comment out for production.
+      # When testing: uncomment the line below
+      # When ready for production: comment it back out
+      # caServer: "https://acme-staging-v02.api.letsencrypt.org/directory"
+
+log:
+  level: INFO
+
+accessLog: {}

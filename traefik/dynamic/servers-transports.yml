@@ -1,0 +1,4 @@
+http:
+  serversTransports:
+    portainer-transport:
+      insecureSkipVerify: true

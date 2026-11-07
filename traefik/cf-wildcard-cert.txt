@@ -1,0 +1,7 @@
+# Cloudflare DNS setup for example.com
+#
+# 1. A record: homelab     -> 100.64.0.10
+# 2. A record: *.homelab   -> 100.64.0.10  (wildcard for services)
+#
+# Traefik requests a wildcard cert for *.homelab.example.com via DNS-01 challenge.
+# The CF API token must have Zone:DNS:Edit permission for example.com.

@@ -1,0 +1,183 @@
+# Dawarich self-hosted — homelab variant.
+# Based on https://raw.githubusercontent.com/Freika/dawarich/master/docker/docker-compose.yml
+# Changes for this homelab:
+#   * added external `traefik_net` and attached it to dawarich_app
+#   * removed the published 3000:3000 port (Traefik reaches the app internally)
+#   * added Traefik labels for dawarich.homelab.example.com
+#   * pass DOMAIN through to app + worker (needed for outgoing email URLs)
+# Env reference: https://dawarich.app/docs/self-hosting/environment-variables/
+
+networks:
+  dawarich:
+  traefik_net:
+    name: traefik_net
+    external: true
+
+services:
+  dawarich_redis:
+    image: redis:7.4-alpine
+    container_name: dawarich_redis
+    command: >
+      redis-server
+      --save 900 1
+      --save 300 10
+      --appendonly no
+    networks:
+      - dawarich
+    volumes:
+      - dawarich_shared:/data
+    restart: always
+    healthcheck:
+      test: [ "CMD", "redis-cli", "--raw", "incr", "ping" ]
+      interval: 10s
+      retries: 5
+      start_period: 30s
+      timeout: 10s
+
+  dawarich_db:
+    image: postgis/postgis:17-3.5-alpine
+    # image: imresamu/postgis:17-3.5-alpine # ARM architecture only; this host is amd64
+    shm_size: 1G
+    container_name: dawarich_db
+    volumes:
+      - dawarich_db_data:/var/lib/postgresql/data
+      - dawarich_shared:/var/shared
+    networks:
+      - dawarich
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: ${POSTGRES_DB:-dawarich_development}
+    restart: always
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-dawarich_development}" ]
+      interval: 10s
+      retries: 5
+      start_period: 30s
+      timeout: 10s
+
+  dawarich_app:
+    image: freikin/dawarich:latest
+    container_name: dawarich_app
+    volumes:
+      - dawarich_public:/var/app/public
+      - dawarich_watched:/var/app/tmp/imports/watched
+      - dawarich_storage:/var/app/storage
+      - dawarich_db_data:/dawarich_db_data
+    networks:
+      - dawarich
+      - traefik_net
+    stdin_open: true
+    tty: true
+    entrypoint: web-entrypoint.sh
+    command: ['bin/rails', 'server', '-p', '3000', '-b', '::']
+    restart: unless-stopped
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.dawarich.rule: "Host(`dawarich.homelab.example.com`)"
+      traefik.http.routers.dawarich.entrypoints: "websecure"
+      traefik.http.routers.dawarich.tls.certresolver: "cloudflare"
+      traefik.http.services.dawarich.loadbalancer.server.port: "3000"
+    environment:
+      RAILS_ENV: ${RAILS_ENV:-production}
+      REDIS_URL: ${REDIS_URL:-redis://dawarich_redis:6379}
+      DATABASE_HOST: ${DATABASE_HOST:-dawarich_db}
+      DATABASE_PORT: ${DATABASE_PORT:-5432}
+      DATABASE_USERNAME: ${DATABASE_USERNAME:-postgres}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:-password}
+      DATABASE_NAME: ${DATABASE_NAME:-dawarich_development}
+      APPLICATION_HOSTS: ${APPLICATION_HOSTS:-localhost,::1,127.0.0.1}
+      APPLICATION_PROTOCOL: ${APPLICATION_PROTOCOL:-http}
+      DOMAIN: ${DOMAIN:-}
+      TIME_ZONE: ${TIME_ZONE:-Europe/London}
+      PROMETHEUS_EXPORTER_ENABLED: ${PROMETHEUS_EXPORTER_ENABLED:-false}
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE:-"CHANGE_ME"}
+      RAILS_LOG_TO_STDOUT: ${RAILS_LOG_TO_STDOUT:-true}
+      SELF_HOSTED: ${SELF_HOSTED:-true}
+      STORE_GEODATA: ${STORE_GEODATA:-true}
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-1}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: ${LOG_MAX_SIZE:-100m}
+        max-file: ${LOG_MAX_FILE:-5}
+    healthcheck:
+      # APPLICATION_PROTOCOL=https makes Rails force-SSL, so the internal plain-HTTP
+      # probe must send X-Forwarded-Proto: https to avoid a 301 redirect loop.
+      test: [ "CMD-SHELL", "wget -qO - --header='X-Forwarded-Proto: https' http://127.0.0.1:3000/api/v1/health | grep -q '\"status\"'" ]
+      interval: 10s
+      retries: 30
+      start_period: 30s
+      timeout: 10s
+    depends_on:
+      dawarich_db:
+        condition: service_healthy
+        restart: true
+      dawarich_redis:
+        condition: service_healthy
+        restart: true
+    deploy:
+      resources:
+        limits:
+          cpus: ${APP_CPU_LIMIT:-0.50}
+          memory: ${APP_MEMORY_LIMIT:-4G}
+
+  dawarich_sidekiq:
+    image: freikin/dawarich:latest
+    container_name: dawarich_sidekiq
+    volumes:
+      - dawarich_public:/var/app/public
+      - dawarich_watched:/var/app/tmp/imports/watched
+      - dawarich_storage:/var/app/storage
+    networks:
+      - dawarich
+    stdin_open: true
+    tty: true
+    entrypoint: sidekiq-entrypoint.sh
+    command: ['sidekiq']
+    restart: unless-stopped
+    environment:
+      RAILS_ENV: ${RAILS_ENV:-production}
+      REDIS_URL: ${REDIS_URL:-redis://dawarich_redis:6379}
+      DATABASE_HOST: ${DATABASE_HOST:-dawarich_db}
+      DATABASE_PORT: ${DATABASE_PORT:-5432}
+      DATABASE_USERNAME: ${DATABASE_USERNAME:-postgres}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:-password}
+      DATABASE_NAME: ${DATABASE_NAME:-dawarich_development}
+      APPLICATION_HOSTS: ${APPLICATION_HOSTS:-localhost,::1,127.0.0.1}
+      DOMAIN: ${DOMAIN:-}
+      BACKGROUND_PROCESSING_CONCURRENCY: ${BACKGROUND_PROCESSING_CONCURRENCY:-3}
+      APPLICATION_PROTOCOL: ${APPLICATION_PROTOCOL:-http}
+      PROMETHEUS_EXPORTER_ENABLED: ${PROMETHEUS_EXPORTER_ENABLED:-false}
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE:-"CHANGE_ME"}
+      RAILS_LOG_TO_STDOUT: ${RAILS_LOG_TO_STDOUT:-true}
+      SELF_HOSTED: ${SELF_HOSTED:-true}
+      STORE_GEODATA: ${STORE_GEODATA:-true}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: ${LOG_MAX_SIZE:-100m}
+        max-file: ${LOG_MAX_FILE:-5}
+    healthcheck:
+      test: [ "CMD-SHELL", "pgrep -f sidekiq" ]
+      interval: 10s
+      retries: 30
+      start_period: 30s
+      timeout: 10s
+    depends_on:
+      dawarich_db:
+        condition: service_healthy
+        restart: true
+      dawarich_redis:
+        condition: service_healthy
+        restart: true
+      dawarich_app:
+        condition: service_healthy
+        restart: true
+
+volumes:
+  dawarich_db_data:
+  dawarich_shared:
+  dawarich_public:
+  dawarich_watched:
+  dawarich_storage:

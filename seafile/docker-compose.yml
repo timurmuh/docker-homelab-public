@@ -1,0 +1,140 @@
+# Seafile CE 13.0 — the database and all configuration stay on local disk;
+# only the block store lives on the Storage Box, through the rclone docker
+# volume plugin, so seaf-fsck --export still walks a normal directory.
+#
+# Traefik terminates TLS and the container publishes no host ports. The
+# wildcard *.homelab.example.com already resolves to the tailnet address,
+# so this is reachable over Tailscale and nowhere else.
+services:
+  db:
+    image: ${SEAFILE_DB_IMAGE:-mariadb:10.11}
+    container_name: seafile-mysql
+    restart: unless-stopped
+    environment:
+      - MYSQL_ROOT_PASSWORD=${INIT_SEAFILE_MYSQL_ROOT_PASSWORD:?Variable is not set or empty}
+      - MYSQL_LOG_CONSOLE=true
+      - MARIADB_AUTO_UPGRADE=1
+    volumes:
+      - seafile-db:/var/lib/mysql
+    networks:
+      - seafile-net
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  redis:
+    image: ${SEAFILE_REDIS_IMAGE:-redis}
+    container_name: seafile-redis
+    restart: unless-stopped
+    networks:
+      - seafile-net
+
+  seafile:
+    image: ${SEAFILE_IMAGE:-seafileltd/seafile-mc:13.0.29}
+    container_name: seafile
+    restart: unless-stopped
+    volumes:
+      # config, logs and the small stuff: local volume
+      - seafile-shared:/shared
+      # the block store: Storage Box over rclone, mounted INSIDE /shared
+      - seafile-blocks:/shared/seafile/seafile-data
+    environment:
+      - SEAFILE_MYSQL_DB_HOST=${SEAFILE_MYSQL_DB_HOST:-db}
+      - SEAFILE_MYSQL_DB_PORT=${SEAFILE_MYSQL_DB_PORT:-3306}
+      - SEAFILE_MYSQL_DB_USER=${SEAFILE_MYSQL_DB_USER:-seafile}
+      - SEAFILE_MYSQL_DB_PASSWORD=${SEAFILE_MYSQL_DB_PASSWORD:?Variable is not set or empty}
+      - INIT_SEAFILE_MYSQL_ROOT_PASSWORD=${INIT_SEAFILE_MYSQL_ROOT_PASSWORD:-}
+      - SEAFILE_MYSQL_DB_CCNET_DB_NAME=${SEAFILE_MYSQL_DB_CCNET_DB_NAME:-ccnet_db}
+      - SEAFILE_MYSQL_DB_SEAFILE_DB_NAME=${SEAFILE_MYSQL_DB_SEAFILE_DB_NAME:-seafile_db}
+      - SEAFILE_MYSQL_DB_SEAHUB_DB_NAME=${SEAFILE_MYSQL_DB_SEAHUB_DB_NAME:-seahub_db}
+      - TIME_ZONE=${TIME_ZONE:-Etc/UTC}
+      - INIT_SEAFILE_ADMIN_EMAIL=${INIT_SEAFILE_ADMIN_EMAIL:-me@example.com}
+      - INIT_SEAFILE_ADMIN_PASSWORD=${INIT_SEAFILE_ADMIN_PASSWORD:-asecret}
+      - SEAFILE_SERVER_HOSTNAME=${SEAFILE_SERVER_HOSTNAME:?Variable is not set or empty}
+      - SEAFILE_SERVER_PROTOCOL=${SEAFILE_SERVER_PROTOCOL:-http}
+      - SITE_ROOT=${SITE_ROOT:-/}
+      - JWT_PRIVATE_KEY=${JWT_PRIVATE_KEY:?Variable is not set or empty}
+      - SEAFILE_LOG_TO_STDOUT=${SEAFILE_LOG_TO_STDOUT:-false}
+      - ENABLE_SEADOC=${ENABLE_SEADOC:-false}
+      - CACHE_PROVIDER=${CACHE_PROVIDER:-redis}
+      - REDIS_HOST=${REDIS_HOST:-redis}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - ENABLE_NOTIFICATION_SERVER=${ENABLE_NOTIFICATION_SERVER:-false}
+      - ENABLE_SEAFILE_AI=${ENABLE_SEAFILE_AI:-false}
+      - ENABLE_FACE_RECOGNITION=${ENABLE_FACE_RECOGNITION:-false}
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.seafile.rule: "Host(`seafile.homelab.example.com`)"
+      traefik.http.routers.seafile.entrypoints: "websecure"
+      traefik.http.routers.seafile.tls.certresolver: "cloudflare"
+      traefik.http.services.seafile.loadbalancer.server.port: "80"
+      # Ofelia reads these. 0.3.x requires SIX cron fields — seconds first.
+      ofelia.enabled: "true"
+      ofelia.job-exec.gc.schedule: "0 30 4 * * 0"
+      ofelia.job-exec.gc.command: "/scripts/gc.sh -t 4"
+      ofelia.job-exec.gc.no-overlap: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:80/ >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - seafile-net
+      - traefik_net
+
+  # Scheduler. Its jobs are declared as labels on the containers they act on,
+  # so a schedule lives beside the service it schedules. Needs the Docker
+  # socket, which is root-equivalent for this container: accepted deliberately,
+  # and no broader than the Portainer and Watchtower containers that already
+  # hold it.
+  ofelia:
+    image: mcuadros/ofelia:0.3.22
+    container_name: ofelia
+    restart: unless-stopped
+    # Scoped to this compose project: a stray label elsewhere cannot register a
+    # job here.
+    command: daemon --docker -f label=com.docker.compose.project=seafile
+    environment:
+      - TZ=UTC
+    # It needs the socket and nothing else — no network at all.
+    network_mode: none
+    # Start after the target exists, so it never boots into an empty scheduler.
+    depends_on:
+      - seafile
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  seafile-db:
+  seafile-shared:
+  # Write-friendly rather than media-friendly: this is a live block store, so
+  # short write-back and a bounded cache matter more than read-ahead.
+  seafile-blocks:
+    driver: rclone
+    driver_opts:
+      remote: "storagebox+remote-drive+crypt:"
+      allow_other: "true"
+      vfs_cache_mode: "full"
+      vfs_cache_max_size: "40G"
+      vfs_cache_max_age: "24h"
+      vfs_write_back: "5s"
+      vfs_read_chunk_size: "32M"
+      vfs_read_ahead: "128M"
+      poll_interval: "0"
+      dir_cache_time: "1m"
+
+networks:
+  seafile-net:
+    name: seafile-net
+  traefik_net:
+    name: traefik_net
+    external: true

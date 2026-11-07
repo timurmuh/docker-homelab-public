@@ -1,0 +1,32 @@
+services:
+  oikb:
+    build: .
+    image: oikb:local
+    container_name: oikb
+    restart: unless-stopped
+    init: true
+    # No depends_on: Open WebUI lives in another compose project.  The loop
+    # tolerates Open WebUI not being up yet and retries every interval.
+    environment:
+      TZ: UTC
+      OIKB_CONFIG_DIR: /config
+      OIKB_INTERVAL: "120"
+    volumes:
+      # The same clone the sidecar serves.  Read-only: oikb uploads, it never
+      # edits the repository.
+      - org-data:/org:ro
+      # config.yaml (Open WebUI API token) and history.db.  Host-only, never
+      # committed.
+      - ./config:/config
+    networks:
+      - notes_net
+
+networks:
+  notes_net:
+    external: true
+    name: notes_net
+
+volumes:
+  org-data:
+    external: true
+    name: org-data

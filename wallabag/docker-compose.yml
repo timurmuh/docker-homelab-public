@@ -1,0 +1,53 @@
+services:
+  wallabag-init:
+    image: alpine:latest
+    container_name: wallabag-init
+    volumes:
+      - ./data:/var/www/wallabag/data
+      - ./images:/var/www/wallabag/web/assets/images
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        echo "Fixing Wallabag permissions..."
+        chown -R nobody:nobody /var/www/wallabag/var
+        chown -R nobody:nobody /var/www/wallabag/bin
+        chown -R nobody:nobody /var/www/wallabag/app/config
+        chown -R nobody:nobody /var/www/wallabag/vendor
+        chown -R nobody:nobody /var/www/wallabag/data/
+        chown -R nobody:nobody /var/www/wallabag/web/
+        echo "Permissions set successfully!"
+    restart: "no"
+
+  wallabag:
+    image: wallabag/wallabag
+    container_name: wallabag
+    restart: unless-stopped
+    depends_on:
+      wallabag-init:
+        condition: service_completed_successfully
+    environment:
+      - SYMFONY__ENV__DOMAIN_NAME=https://wallabag.homelab.example.com
+      - SYMFONY__ENV__SERVER_NAME="My Wallabag Instance"
+      - SYMFONY__ENV__DATABASE_DRIVER=pdo_sqlite
+    volumes:
+      - ./data:/var/www/wallabag/data
+      - ./images:/var/www/wallabag/web/assets/images
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.wallabag.rule: "Host(`wallabag.homelab.example.com`)"
+      traefik.http.routers.wallabag.entrypoints: "websecure"
+      traefik.http.routers.wallabag.tls.certresolver: "cloudflare"
+      traefik.http.services.wallabag.loadbalancer.server.port: "80"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost"]
+      interval: 1m
+      timeout: 3s
+      retries: 3
+    networks:
+      - traefik_net
+
+networks:
+  traefik_net:
+    name: traefik_net
+    external: true

@@ -1,0 +1,102 @@
+name: searchhub
+
+x-logging: &logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  searchhub:
+    build: .
+    # Locally built tag, not a published one: nothing pulls this from a registry.
+    image: searchhub:local
+    container_name: searchhub
+    restart: unless-stopped
+    # No `ports:` — nothing outside Docker talks to this. Traefik reaches it on
+    # traefik_net, every other service on search_net, both by name.
+    networks:
+      - traefik_net
+      # Shared with searxng and crw: Open WebUI fetches `http://searchhub:8080`
+      # across this network.
+      - search_net
+    # Supplied by the environment (or an untracked .env file). There is no
+    # tracked .env beside this compose file: secrets do not belong in git.
+    #
+    # The bearer token is `${…:?…}`: compose 5.3.1 does not fail on a plain
+    # `${NAME}`, it only warns and substitutes an empty string, and a container
+    # with an empty token starts and then dies. The four provider keys stay plain
+    # `${NAME}`, because blank legitimately means "provider not configured" and
+    # the search/fetch chains skip such a provider; a blank token has no such
+    # meaning. `load_settings()` keeps its own guard as the second line of
+    # defence.
+    environment:
+      - SEARCHHUB_API_KEY=${SEARCHHUB_API_KEY:?SEARCHHUB_API_KEY is required — export it or use an untracked .env}
+      - EXA_API_KEY=${EXA_API_KEY}
+      - TAVILY_API_KEY=${TAVILY_API_KEY}
+      - BRAVE_API_KEY=${BRAVE_API_KEY}
+      - JINA_API_KEY=${JINA_API_KEY}
+      # Not a secret: where the crw stack answers, on search_net.
+      - CRW_URL=${CRW_URL}
+      # Preference order for the search chain, e.g. "tavily,exa,brave,searxng".
+      # Blank means the compiled default (exa,tavily,brave,searxng); an unknown
+      # name stops the container at startup instead of reordering silently.
+      - SEARCH_ORDER=${SEARCH_ORDER}
+      # The same preference rule for the fetch chain (default crw,jina,tavily,exa):
+      # blank means the compiled default, an unknown name stops startup.
+      - FETCH_ORDER=${FETCH_ORDER}
+      # Per-upstream ceiling for one fetch call, in seconds. 30, not search's 15:
+      # crw's worst measured page takes 16.96 s and its own per-tier ceiling is
+      # 30 s, so a 15 s cap would cancel fetches that were about to succeed.
+      - FETCH_PROVIDER_TIMEOUT_S=${FETCH_PROVIDER_TIMEOUT_S}
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.searchhub.rule: "Host(`searchhub.homelab.example.com`)"
+      traefik.http.routers.searchhub.entrypoints: "websecure"
+      traefik.http.routers.searchhub.tls.certresolver: "cloudflare"
+      traefik.http.services.searchhub.loadbalancer.server.port: "8080"
+    # `/health` is the one unauthenticated path, so the probe needs no token and
+    # the token never appears in an image, a compose file or a process listing.
+    #
+    # The timings are load-bearing, not taste. Docker reports `unhealthy` only
+    # after start_period + retries × interval of consecutive failures:
+    #     15 s + 3 × 10 s = 45 s
+    # deploy.sh's health gate gives up at 120 s, so 45 s lands comfortably inside
+    # it and a broken container is named instead of being reported "still
+    # starting" and then "complete". Restoring interval: 30s would push the first
+    # verdict to 15 + 90 = 105 s and reintroduce exactly that bug — change the
+    # gate's budget in deploy.sh if you ever need a slower probe here.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request,sys;
+          sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=4).status == 200 else 1)
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    mem_limit: 512m
+    memswap_limit: 512m         # no swap escape hatch — count swap against the cap
+    pids_limit: 256             # uvicorn is single-process; nothing here forks
+    read_only: true             # immutable root FS
+    tmpfs:
+      - /tmp                    # the only writable scratch space
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    init: true                  # reap the children uvicorn never waits for
+    logging: *logging
+
+networks:
+  traefik_net:
+    name: traefik_net
+    external: true
+  # Created by deploy.sh, not by any stack: searxng, crw and this file all
+  # declare it external, so none of them can bring it into being on its own.
+  search_net:
+    name: search_net
+    external: true

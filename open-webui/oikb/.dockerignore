@@ -1,0 +1,3 @@
+# The Open WebUI API token lives here; it must never enter an image layer or
+# the build context.
+config/

@@ -1,0 +1,28 @@
+.DS_Store
+.idea
+*.log
+tmp/
+
+# Secrets and local configuration. Only the *.example / *.template files are
+# tracked.
+.env
+.env.rota
+.secrets/
+rclone.conf
+open-webui/oikb/config/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Agent / tool scratch
+.superpowers/
+.capture-tmp/
+
+# Eval data is generated from a local corpus and is never published. The
+# derivation and capture code stays tracked; the data does not.
+eval/canon/
+eval/results/
+eval/corpus/*.json
+eval/corpus/*.jsonl

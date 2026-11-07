@@ -1,0 +1,148 @@
+name: crw
+
+x-logging: &logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # Internal fetch engine (fastCRW). Not routed through Traefik on purpose:
+  # only other containers on `search_net` talk to it, over `crw:3000`.
+  crw:
+    container_name: crw
+    image: ghcr.io/fastcrw/crw:0.39.1
+    restart: unless-stopped
+    environment:
+      - CRW_CONFIG=config
+      - RUST_LOG=info
+    volumes:
+      - ./config.toml:/app/config.toml:ro
+    networks:
+      - search_net
+    depends_on:
+      lightpanda:
+        condition: service_started
+      # `required: false` is upstream's idiom: without it an inactive `heavy`
+      # profile makes a plain `docker compose up` fail on the missing dependency.
+      chrome:
+        condition: service_started
+        required: false
+    # The image has bash but no curl/wget, and `/bin/sh` is dash (no /dev/tcp),
+    # so the probe is an explicit `bash -c`.
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/3000 &&
+          printf 'GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          head -1 <&3 | grep -q ' 200 '
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    mem_limit: 2g
+    memswap_limit: 2g          # no swap escape hatch — count swap against the cap
+    pids_limit: 512            # bound fork-bombs / runaway worker spawning
+    read_only: true            # immutable root FS
+    tmpfs:
+      - /tmp                   # the only writable scratch space
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging: *logging
+
+  # Primary JS renderer — lightweight, fast startup. Pinned by digest: upstream
+  # compose floats `:latest`. Pinning is this repo's forward rule for new
+  # stacks; older ones float and `searxng` is the documented exception, so
+  # neither is a licence to add more floating tags. See `crw/README.md`.
+  lightpanda:
+    image: lightpanda/browser@sha256:5d1d724c476957d8c2f8393a51fd089477523b0e5aa9c783c48688785d934fb9
+    restart: unless-stopped
+    environment:
+      - LIGHTPANDA_DISABLE_TELEMETRY=true
+    # Refuse private/internal destinations in the browser itself, on the
+    # resolved socket address. Copied verbatim from the upstream crw compose
+    # file; overrides the image CMD, so the whole serve line is repeated.
+    command:
+      - "/bin/lightpanda"
+      - "serve"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "9222"
+      - "--log-level"
+      - "info"
+      - "--block-private-networks"
+      - "--block-cidrs"
+      - "0.0.0.0/8,10.0.0.0/8,127.0.0.0/8,169.254.0.0/16,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,224.0.0.0/4,240.0.0.0/4,192.0.0.0/24,192.0.2.0/24,198.18.0.0/15,198.51.100.0/24,203.0.113.0/24,fc00::/7,fe80::/10,fec0::/10,ff00::/8,::/96,64:ff9b:1::/48,2002::/16"
+    networks:
+      - search_net
+    mem_limit: 1g
+    memswap_limit: 1g
+    pids_limit: 512
+    healthcheck:
+      # Same bash -c shape as crw: `/bin/sh` is dash in this image.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9222"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    security_opt:
+      - no-new-privileges:true
+    logging: *logging
+
+  # Top rung of the renderer ladder — full Chromium, for SPAs that LightPanda
+  # cannot hydrate (Next.js App Router, React 18+, Cloudflare interstitials).
+  # Opt-in via the `heavy` profile: 371 MB image and ~180 MB resident idle,
+  # too much to carry on a small host by default. Pinned by digest, like
+  # lightpanda, because upstream floats `:latest`.
+  #
+  # `--remote-allow-origins=*` is load-bearing and governs the HTTP `Origin`
+  # header on the DevTools websocket handshake, not `Host`: Chrome >= 111
+  # refuses DevTools attachment from a web origin unless the origin is
+  # allowlisted, and crw's CDP client sends an `Origin` that is not
+  # `localhost`. `--disable-http2` dodges ERR_HTTP2_PROTOCOL_ERROR on hosts
+  # that hard-fail on Chrome's JA4 fingerprint. `--ignore-certificate-errors`
+  # is upstream's own choice, copied verbatim: TLS is deliberately not
+  # verified for pages this tier fetches. The command block is copied verbatim
+  # from the upstream compose file, which also means this tier has no
+  # `--block-private-networks` analogue — Chromium has no such flag.
+  # Private-range redirects are still refused, by crw's HTTP-client guard and
+  # its CDP request interception rather than by anything this service
+  # enforces. See "Known exposure" in README.md before adding or removing
+  # anything here.
+  chrome:
+    image: chromedp/headless-shell@sha256:7bee201478b2f6266aae01243740ee85c16281e32f42d3aed9fdf04f4eace7a1
+    profiles: ["heavy"]
+    restart: unless-stopped
+    shm_size: "1g"             # Chromium maps /dev/shm heavily; the 64m default crashes tabs
+    command:
+      - "--remote-allow-origins=*"
+      - "--ignore-certificate-errors"
+      - "--disable-http2"
+      - "--disable-blink-features=AutomationControlled"
+    networks:
+      - search_net
+    mem_limit: 2g
+    memswap_limit: 2g          # no swap escape hatch — count swap against the cap
+    pids_limit: 1024           # Chromium forks renderer/gpu/utility processes
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9222"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging: *logging
+
+networks:
+  search_net:
+    name: search_net
+    external: true

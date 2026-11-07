@@ -1,0 +1,14 @@
+services:
+  whisper-transcriber-telegram-bot:
+    image: ghcr.io/flyingfathead/whisper-transcriber-telegram-bot:latest
+    container_name: whisper-transcriber-telegram-bot
+    volumes:
+      - ./config:/app/config
+      - whisper_cache:/root/.cache/whisper
+    env_file:
+      - .env
+    restart: unless-stopped
+
+volumes:
+  whisper_cache:
+      driver: local

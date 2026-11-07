@@ -1,0 +1,46 @@
+# oikb sources for Open WebUI.
+#
+# Copy this file to `.oikb.yaml` and replace the `kb-id` values with the IDs
+# from your Open WebUI knowledge-base collection.
+#
+# `oikb sync` reads `./.oikb.yaml` from its CURRENT DIRECTORY, so the file must
+# live in the job's working directory (`/app` in the container).
+#
+# Each entry is self-contained on purpose: `oikb` deep-merges entries by
+# `kb-id`, and lists are REPLACED when both sides define the same key. Relying
+# on `defaults.filter` would silently drop one entry's filters.
+#
+# Exclude byte-identical copies and empty files. Open WebUI refuses a file when
+# the hash of its extracted text already exists in the same collection from a
+# different file, and `oikb` retries anything absent from the KB forever.
+
+defaults:
+  # Every upload writes to Open WebUI's SQLite database. A low concurrency is
+  # safer than a fast one: `insert_new_file` can fail with "database is locked"
+  # under parallel writes, and a failure at the link step can leave orphaned
+  # chunks that block that content later.
+  concurrency: 2
+
+sources:
+  - name: notes
+    source: /org
+    kb-id: 00000000-0000-0000-0000-000000000001
+    filter:
+      exclude:
+        - "*.png"
+        - "*.jpg"
+        - "*.jpeg"
+        - "*.gif"
+        - "*.svg"
+        - "archive/**"
+        - "**/*.sync-conflict-*"
+
+  - name: reference
+    source: /org/reference
+    kb-id: 00000000-0000-0000-0000-000000000002
+    filter:
+      include:
+        - "**/*.org"
+      exclude:
+        - "*.png"
+        - "*.jpg"

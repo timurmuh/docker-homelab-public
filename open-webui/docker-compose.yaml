@@ -1,0 +1,97 @@
+services:
+  openwebui:
+    container_name: open-webui
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.openwebui.rule: "Host(`openwebui.homelab.example.com`)"
+      traefik.http.routers.openwebui.entrypoints: "websecure"
+      traefik.http.routers.openwebui.tls.certresolver: "cloudflare"
+      traefik.http.services.openwebui.loadbalancer.server.port: "8080"
+      # Tailnet-only, enforced at the router and not merely by DNS. The hostname
+      # resolves to the tailscale address, but Traefik answers :443 for any Host
+      # header, so a request aimed at the host's LAN or public address with
+      # `Host: openwebui...` would otherwise reach this router. Only the
+      # Tailscale CGNAT range may connect (10.0.0.x is deliberately excluded).
+      traefik.http.middlewares.openwebui-tailnet.ipallowlist.sourcerange: "100.64.0.0/10"
+      traefik.http.routers.openwebui.middlewares: "openwebui-tailnet@docker"
+      "com.centurylinklabs.watchtower.enable": "true"
+    image: ghcr.io/open-webui/open-webui:main
+    environment:
+      WEB_SEARCH_ENGINE: firecrawl
+      WEB_LOADER_ENGINE: firecrawl
+      # Placeholder only: this file is tracked, so no secret here. Open WebUI
+      # seeds its `config` table from the environment only while the row is
+      # absent; after that the stored value wins and these env vars are ignored.
+      # The real key lives in the Admin config (`config` row
+      # `web.FIRECRAWL_API_KEY`) and must be re-entered there after any rebuild
+      # that starts from an empty database.
+      FIRECRAWL_API_KEY: any
+      # searchhub, not the Firecrawl stack: both stacks join traefik_net, so the
+      # short name resolves without a round trip through Traefik.
+      FIRECRAWL_API_BASE_URL: http://searchhub:8080
+      # Seconds, not milliseconds -- get_firecrawl_scrape_timeout_ms multiplies
+      # this by 1000. 90000 here would be a ~25-hour client timeout, not 90 s.
+      FIRECRAWL_TIMEOUT: 90
+      # SSRF guard blocks requests to RFC 1918 addresses by default.
+      # Firecrawl lives on a Docker network (private IP range), so this
+      # must be true or RAG page fetching will silently fail.
+      ENABLE_RAG_LOCAL_WEB_FETCH: true
+      # Keep WAL on: the database is already in WAL mode, and switching it off
+      # would leave stale -wal/-shm files beside webui.db.
+      DATABASE_ENABLE_SQLITE_WAL: "True"
+    # No published port: reachable through Traefik only, which enforces the
+    # tailnet allowlist below.
+    volumes:
+      - open-webui:/app/backend/data
+    networks:
+      - traefik_net
+      - notes_net
+
+  # One-shot ownership fix for the named volumes. Docker creates them as
+  # root; Open Terminal runs as uid 1000 and must be able to write /work
+  # and /home/user.
+  open-terminal-init:
+    build: ./open-terminal
+    image: open-terminal:local
+    user: root
+    entrypoint:
+      - sh
+      - -c
+      - "chown -R ${NOTES_UID:-1000}:${NOTES_GID:-1000} /work /home/user"
+    restart: "no"
+    volumes:
+      - open-terminal-home:/home/user
+      - open-terminal-work:/work
+
+  # No traefik labels and no published ports: reachable only from open-webui
+  # over notes_net, at http://open-terminal:8000.
+  open-terminal:
+    build: ./open-terminal
+    image: open-terminal:local
+    container_name: open-terminal
+    restart: unless-stopped
+    labels:
+      traefik.enable: "false"
+    command: ["run", "--cwd", "/work"]
+    environment:
+      OPEN_TERMINAL_API_KEY: "${OPEN_TERMINAL_API_KEY:?set OPEN_TERMINAL_API_KEY in open-webui/.env}"
+    volumes:
+      - open-terminal-home:/home/user
+      - open-terminal-work:/work
+    networks:
+      - notes_net
+    depends_on:
+      open-terminal-init:
+        condition: service_completed_successfully
+
+volumes:
+  open-webui:
+  open-terminal-home:
+  open-terminal-work:
+
+networks:
+  traefik_net:
+    name: traefik_net
+    external: true
+  notes_net:
+    name: notes_net

@@ -1,0 +1,112 @@
+services:
+  # Nginx reverse proxy — routes /api/*, /docs, /metrics, /ws/* → rota-core:8001,
+  # everything else → rota-dashboard:3000. Kept as-is from the upstream rota
+  # project to preserve path-based routing and WebSocket upgrade headers without
+  # reimplementing in Traefik.
+  rota-proxy:
+    image: nginx:alpine
+    restart: unless-stopped
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - rota-core
+      - rota-dashboard
+    networks:
+      - traefik_net
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.rota.rule: "Host(`rota.homelab.example.com`)"
+      traefik.http.routers.rota.entrypoints: "websecure"
+      traefik.http.routers.rota.tls.certresolver: "cloudflare"
+      traefik.http.services.rota.loadbalancer.server.port: "80"
+
+  # Pinned to v2.1.0 — pinning a tag prevents surprise breakage from upstream
+  # main-branch changes. Core builds from GitHub (Go), no font/download issues.
+  rota-core:
+    build:
+      context: https://github.com/alpkeskin/rota.git#v2.1.0:core
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DB_HOST: timescaledb
+      DB_PORT: "5432"
+      DB_USER: rota
+      DB_PASSWORD: ${ROTA_DB_PASSWORD:?set ROTA_DB_PASSWORD}
+      DB_NAME: rota
+      DB_SSLMODE: disable
+      PROXY_PORT: "8000"
+      LOG_LEVEL: info
+    env_file:
+      - .env.rota
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    dns: ["1.1.1.1", "8.8.8.8"]
+    networks:
+      - traefik_net
+
+  # Pinned to v2.1.0. Dashboard is a Next.js app that downloads Google Fonts
+  # (Fira Code) during `next build`. Build containers on this host cannot reach
+  # Google servers through Docker's default bridge DNS. build.network:host
+  # bypasses Docker's network stack during build, using the host's network
+  # directly so the font fetch succeeds.
+  #
+  # NEXT_PUBLIC_API_URL is empty (default) — the dashboard uses same-origin API
+  # calls, e.g. /api/v1/auth/login, which nginx routes to rota-core. Setting it
+  # to a full URL caused path doubling (/api/v1/api/v1/...).
+  # NEXT_PUBLIC_PROXY_PORT is a display-only value shown in copy-able proxy URLs.
+  rota-dashboard:
+    build:
+      context: https://github.com/alpkeskin/rota.git#v2.1.0:dashboard
+      dockerfile: Dockerfile
+      network: host
+      args:
+        NEXT_PUBLIC_API_URL: ""
+        NEXT_PUBLIC_PROXY_PORT: "8000"
+    restart: unless-stopped
+    env_file:
+      - .env.rota
+    depends_on:
+      - rota-core
+    dns: ["1.1.1.1", "8.8.8.8"]
+    networks:
+      - traefik_net
+
+  rota-aggregator:
+    build:
+      context: .
+      dockerfile: Dockerfile.aggregator
+    restart: unless-stopped
+    env_file:
+      - .env.rota
+    depends_on:
+      - rota-core
+    dns: ["1.1.1.1", "8.8.8.8"]
+    networks:
+      - traefik_net
+
+  timescaledb:
+    image: timescale/timescaledb:2.22.1-pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: rota
+      POSTGRES_PASSWORD: ${ROTA_DB_PASSWORD:?set ROTA_DB_PASSWORD}
+      POSTGRES_DB: rota
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rota"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    dns: ["1.1.1.1", "8.8.8.8"]
+    networks:
+      - traefik_net
+
+volumes:
+  timescale_data:
+
+networks:
+  traefik_net:
+    name: traefik_net
+    external: true
